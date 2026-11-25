@@ -13,9 +13,12 @@ android {
         applicationId = "com.beegear.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.3.0"
+        versionCode = 4
+        versionName = "1.3.1"
     }
+
+    val hasReleaseKey = file("beegear.jks").let { it.exists() && it.length() > 0 } &&
+        !System.getenv("KEYSTORE_PASSWORD").isNullOrBlank()
 
     signingConfigs {
         create("release") {
@@ -29,7 +32,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            // Secrets না থাকলে debug key দিয়ে সাইন হবে, যাতে build fail না করে
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
 

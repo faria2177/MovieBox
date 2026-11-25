@@ -27,8 +27,15 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Decode Keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/beegear.jks
+      - name: Decode Keystore (if secret exists)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > app/beegear.jks
+          else
+            echo "KEYSTORE_BASE64 secret নেই — debug key দিয়ে সাইন হবে"
+          fi
 
       - name: Get App Version
         id: get_version

@@ -865,6 +865,8 @@ private fun readRecommendationList(raw: String?): List<Recommendation> {
 
 private val categories = listOf(
     Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
+    Category("English Movies (Circle 2)", "http://index2.circleftp.net/FILE/English%20Movies/"),
+    Category("English Movies (Circle)", "http://index.circleftp.net/FILE/English%20Movies/"),
     Category("English Movies 1080p", "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"),
     Category("IMDb Top 250", "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"),
     Category("Hindi Movies", "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"),

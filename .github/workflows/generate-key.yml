@@ -1,0 +1,12 @@
+name: Generate Keystore
+on: workflow_dispatch
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Keystore & Base64
+        run: |
+          keytool -genkey -v -keystore beegear.jks -keyalg RSA -keysize 2048 -validity 10000 -alias beegear -storepass beegear123 -keypass beegear123 -dname "CN=BeeGear, OU=App, O=BeeGear, L=Dhaka, S=Dhaka, C=BD"
+          echo "=== নিচের পুরো লেখাটি কপি করুন ==="
+          base64 -w 0 beegear.jks
+          echo ""

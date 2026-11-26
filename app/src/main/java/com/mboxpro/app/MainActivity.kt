@@ -15,6 +15,13 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.view.View
+import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -1352,6 +1359,13 @@ private object NaturalBdApi {
     fun posterHint(url: String): String? = posterHints[url]
     private val streamExts = videoExtensions + ".m3u8"
 
+    /** মুভি/সিরিজের পেজ — এগুলো অ্যাপের ভেতরে সাইটের নিজের পেজ (WebView) হিসেবে খোলে, লগইন ও প্লেয়ার সাইটের */
+    fun isTitlePage(url: String): Boolean = handles(url) &&
+        Regex("^/(movie|series)/\\d+/?$").matches(try { URL(url).path } catch (_: Exception) { "" })
+
+    fun webUrlFor(url: String): String =
+        if (URL(url).path.startsWith("/movie/")) url.substringBefore("?") + "?autoplay=1" else url
+
     fun handles(url: String): Boolean = try {
         val u = URL(url)
         u.host.equals("naturalbd.com", true) || u.host.endsWith(".naturalbd.com", true)
@@ -1392,6 +1406,10 @@ private object NaturalBdApi {
             setRequestProperty("Sec-Fetch-Site", "same-origin")
             setRequestProperty("Sec-Fetch-Mode", "cors")
             setRequestProperty("Sec-Fetch-Dest", "empty")
+            try {
+                CookieManager.getInstance().getCookie("${u.protocol}://${u.host}")?.let { setRequestProperty("Cookie", it) }
+            } catch (_: Exception) {
+            }
         }
         try {
             val code = conn.responseCode
@@ -2019,6 +2037,7 @@ fun MBoxProApp() {
     var playingTitle by remember { mutableStateOf("") }
     var showSettings by remember { mutableStateOf(false) }
     var showDownloads by remember { mutableStateOf(false) }
+    var webPageUrl by remember { mutableStateOf<String?>(null) }
     var recommendations by remember { mutableStateOf(emptyList<Recommendation>()) }
     var recommendationsLoading by remember { mutableStateOf(true) }
     var favorites by remember {
@@ -2079,6 +2098,10 @@ fun MBoxProApp() {
     fun openFolder(title: String, url: String, poster: String? = null) {
         showSettings = false
         showDownloads = false
+        if (NaturalBdApi.isTitlePage(url)) {
+            webPageUrl = NaturalBdApi.webUrlFor(url)
+            return
+        }
         if (currentUrl.isNotBlank()) {
             stack = stack + FolderLocation(currentTitle, currentUrl, currentPoster)
         }
@@ -2088,7 +2111,9 @@ fun MBoxProApp() {
     }
 
     fun back() {
-        if (playingUrl != null) {
+        if (webPageUrl != null) {
+            webPageUrl = null
+        } else if (playingUrl != null) {
             playingUrl = null
         } else if (showDownloads) {
             showDownloads = false
@@ -2109,7 +2134,7 @@ fun MBoxProApp() {
         }
     }
 
-    BackHandler(enabled = playingUrl != null || showDownloads || showSettings || currentUrl.isNotBlank() || tab != "HOME") {
+    BackHandler(enabled = webPageUrl != null || playingUrl != null || showDownloads || showSettings || currentUrl.isNotBlank() || tab != "HOME") {
         back()
     }
 
@@ -2167,10 +2192,12 @@ fun MBoxProApp() {
     Box(
         Modifier
             .fillMaxSize()
-            .then(if (playingUrl == null) Modifier.statusBarsPadding().navigationBarsPadding() else Modifier)
+            .then(if (playingUrl == null && webPageUrl == null) Modifier.statusBarsPadding().navigationBarsPadding() else Modifier)
             .appSurfaceBackground()
     ) {
         when {
+            webPageUrl != null -> SiteWebScreen(webPageUrl!!) { webPageUrl = null }
+
             playingUrl != null -> VideoPlayerScreen(playingUrl!!, playingTitle) { playingUrl = null }
 
             showDownloads -> DownloadQueueScreen(onBack = { showDownloads = false })
@@ -2268,7 +2295,7 @@ fun MBoxProApp() {
             )
         }
 
-        if (playingUrl == null && currentUrl.isBlank() && !showSettings && !showDownloads) {
+        if (webPageUrl == null && playingUrl == null && currentUrl.isBlank() && !showSettings && !showDownloads) {
             FloatingBottomNav(
                 tab = tab,
                 onSelect = { tab = it },
@@ -3863,6 +3890,124 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
     } else {
         Box(modifier.background(tagDark), contentAlignment = Alignment.Center) {
             Text("MBOX PRO", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
+        }
+    }
+}
+
+/* ============================================================================
+   SITE WEB SCREEN — লগইন লাগে এমন সাইট (Natural BD) অ্যাপের ভেতরে; কুকি মনে থাকে, ফুলস্ক্রিন ভিডিও সাপোর্ট
+   ============================================================================ */
+@Composable
+private fun SiteWebScreen(url: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    var webView by remember { mutableStateOf<WebView?>(null) }
+    var customView by remember { mutableStateOf<View?>(null) }
+    var customCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+    var progress by remember { mutableStateOf(0) }
+
+    BackHandler {
+        when {
+            customView != null -> customCallback?.onCustomViewHidden()
+            webView?.canGoBack() == true -> webView?.goBack()
+            else -> onClose()
+        }
+    }
+
+    DisposableEffect(customView) {
+        val activity = context as? Activity
+        val oldOrientation = activity?.requestedOrientation
+        if (customView != null) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        onDispose {
+            if (customView != null && oldOrientation != null) activity?.requestedOrientation = oldOrientation
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                CookieManager.getInstance().flush()
+                webView?.stopLoading()
+                webView?.destroy()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    keepScreenOn = true
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    webViewClient = WebViewClient()
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                            progress = newProgress
+                        }
+
+                        override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                            customView = view
+                            customCallback = callback
+                        }
+
+                        override fun onHideCustomView() {
+                            customView = null
+                            customCallback = null
+                        }
+                    }
+                    loadUrl(url)
+                    webView = this
+                }
+            },
+            modifier = Modifier.fillMaxSize().statusBarsPadding()
+        )
+
+        customView?.let { v ->
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        setBackgroundColor(android.graphics.Color.BLACK)
+                        (v.parent as? ViewGroup)?.removeView(v)
+                        addView(v, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        if (customView == null) {
+            if (progress in 1..99) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .fillMaxWidth(progress / 100f)
+                        .height(3.dp)
+                        .background(accentRed)
+                )
+            }
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(18.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape)
+                    .clickable { onClose() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(20.dp))
+            }
         }
     }
 }

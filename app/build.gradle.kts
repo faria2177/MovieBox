@@ -13,8 +13,8 @@ android {
         applicationId = "com.mboxpro.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.6.0"
+        versionCode = 8
+        versionName = "1.7.0"
     }
 
     val hasReleaseKey = file("mboxpro.jks").let { it.exists() && it.length() > 0 } &&
@@ -73,5 +73,6 @@ dependencies {
     implementation("org.jsoup:jsoup:1.18.3")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

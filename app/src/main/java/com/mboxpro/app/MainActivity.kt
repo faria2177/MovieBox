@@ -941,6 +941,20 @@ private val servers = listOf(
         categories = listOf(
             Category("English Movies", "http://new.circleftp.net/category/20")
         )
+    ),
+    MediaServer(
+        id = "khulnaplex",
+        name = "Khulnaplex",
+        shortLogo = "KP",
+        logoColor = Color(0xFFE50914),
+        categories = listOf(
+            Category("English Movies", "http://khulnaplex.net/movies.php?category=english"),
+            Category("Bangla Movies", "http://khulnaplex.net/movies.php?category=bangla"),
+            Category("Hindi Movies", "http://khulnaplex.net/movies.php?category=hindi"),
+            Category("Animation", "http://khulnaplex.net/movies.php?category=animation"),
+            Category("Tamil / South", "http://khulnaplex.net/movies.php?category=tamil"),
+            Category("Dubbed Movies", "http://khulnaplex.net/movies.php?category=dub")
+        )
     )
 )
 
@@ -1168,8 +1182,147 @@ private object CircleNewApi {
     }
 }
 
+/* ============================================================================
+   KHULNAPLEX — PHP সাইট: movies.php?category=X&page=N (movie-card) -> watch.php?id=..&type=movie
+   পেজগুলো আলাদা লিংক না দিয়ে "Next" ধরে ধরে নিজে থেকেই পরের পেজ লোড হয়
+   ============================================================================ */
+private object KhulnaplexSite {
+    private const val HOST = "khulnaplex.net"
+    private val posterHints = ConcurrentHashMap<String, String>()
+    private val videoUrlRegex = Regex(
+        "(https?:)?//[^\\s\"'<>]+?\\.(?:mkv|mp4|m4v|avi|webm|mov|ts|m3u8)(?![A-Za-z0-9])(?:\\?[^\\s\"'<>]*)?",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun handles(url: String): Boolean = try {
+        val u = URL(url)
+        (u.host.equals(HOST, true) || u.host.endsWith(".$HOST", true)) &&
+            (u.path.endsWith("/movies.php") || u.path.endsWith("/watch.php"))
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun fetch(url: String, timeoutMs: Int) =
+        Jsoup.connect(url).userAgent("Mozilla/5.0").timeout(timeoutMs).ignoreContentType(true).get()
+
+    fun scan(url: String, timeoutMs: Int): Result<List<MediaEntry>> = try {
+        Result.success(if (URL(url).path.endsWith("/movies.php")) scanList(url, timeoutMs) else scanWatch(url, timeoutMs))
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+
+    private fun pageOf(url: String) = Regex("[?&]page=(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
+    /** একটি লিস্ট পেজ পড়ে মুভিগুলো + পরের পেজের লিংক দেয় */
+    private fun parseList(url: String, timeoutMs: Int): Pair<List<MediaEntry>, String?> {
+        val doc = fetch(url, timeoutMs)
+        val page = pageOf(url)
+        val base = URL(url)
+        val cards = doc.select("div.movie-card")
+        val list = mutableListOf<MediaEntry>()
+        cards.forEachIndexed { i, card ->
+            val onclick = card.attr("onclick")
+            val id = Regex("\\(\\s*['\"]?([A-Za-z0-9_-]+)['\"]?\\s*\\)").find(onclick)?.groupValues?.get(1)
+                ?: return@forEachIndexed
+            val type = if (onclick.contains("series", true) || onclick.contains("show", true)) "series" else "movie"
+            val title = card.selectFirst("h3")?.text()?.trim().orEmpty()
+                .ifBlank { card.selectFirst("img")?.attr("alt")?.trim().orEmpty() }
+                .ifBlank { "Movie $id" }
+            val year = card.selectFirst(".year")?.text()?.trim().orEmpty()
+            val watchUrl = "${base.protocol}://${base.host}/watch.php?id=$id&type=$type"
+            card.selectFirst("img")?.absUrl("src")?.takeIf { it.isNotBlank() }?.let { posterHints[watchUrl] = it }
+            list += MediaEntry(
+                name = if (year.isNotBlank() && !title.contains(year)) "$title ($year)" else title,
+                url = watchUrl,
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = 100_000 - (page - 1) * 1000 - i
+            )
+        }
+        val next = doc.select(".pagination a").firstOrNull { it.text().contains("Next", true) }
+            ?.absUrl("href")?.takeIf { it.isNotBlank() && pageOf(it) > page }
+        return list to next
+    }
+
+    private fun scanList(url: String, timeoutMs: Int): List<MediaEntry> {
+        val (items, next) = parseList(url, timeoutMs)
+        val out = items.toMutableList()
+        if (next != null) {
+            out += MediaEntry(
+                name = "» আরও দেখুন (পেজ ${pageOf(next)})",
+                url = next,
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = 0
+            )
+        }
+        return out
+    }
+
+    /** সার্চের জন্য ক্যাটাগরির সব পেজ (সর্বোচ্চ maxPages) একে একে পড়া */
+    fun allPages(categoryUrl: String, maxPages: Int = 20, timeoutMs: Int = 12000): List<MediaEntry> {
+        val out = mutableListOf<MediaEntry>()
+        var url: String? = categoryUrl
+        var count = 0
+        while (url != null && count < maxPages) {
+            val (items, next) = try { parseList(url, timeoutMs) } catch (_: Exception) { break }
+            out += items
+            url = next
+            count++
+        }
+        return out
+    }
+
+    private fun scanWatch(url: String, timeoutMs: Int): List<MediaEntry> {
+        val doc = fetch(url, timeoutMs)
+        val out = mutableListOf<MediaEntry>()
+        val poster = posterHints[url]
+            ?: doc.selectFirst("meta[property=og:image]")?.absUrl("content")?.takeIf { it.isNotBlank() }
+            ?: doc.select("img").map { it.absUrl("src") }.firstOrNull { it.contains("image.tmdb.org") }
+        if (!poster.isNullOrBlank()) {
+            out += MediaEntry(name = "poster", url = poster, isFolder = false, isVideo = false, isImage = true)
+        }
+
+        val found = LinkedHashSet<String>()
+        // ১) <video>/<source>/<a>/<iframe> ট্যাগের লিংক
+        doc.select("video[src], source[src], a[href], iframe[src], [data-src], [data-url], [data-file]").forEach { el ->
+            listOf("src", "href", "data-src", "data-url", "data-file").forEach { attr ->
+                val v = el.absUrl(attr)
+                if (v.startsWith("http") && videoUrlRegex.matches(v)) found += v
+            }
+        }
+        // ২) JavaScript বা টেক্সটের ভেতরে থাকা লিংক
+        val html = doc.outerHtml().replace("\\/", "/").replace("&amp;", "&")
+        videoUrlRegex.findAll(html).forEach { m ->
+            val v = m.value
+            found += if (v.startsWith("//")) "${URL(url).protocol}:$v" else v
+        }
+
+        val title = doc.selectFirst("h1")?.text()?.trim().orEmpty()
+        found.map { it.replace(" ", "%20") }.distinct().forEachIndexed { i, link ->
+            val fileName = try {
+                URLDecoder.decode(URL(link).path.substringAfterLast("/"), "UTF-8")
+            } catch (_: Exception) {
+                ""
+            }
+            out += MediaEntry(
+                name = fileName.ifBlank { title.ifBlank { "Video ${i + 1}" } },
+                url = link,
+                isFolder = false,
+                isVideo = true,
+                isImage = false,
+                sourceOrder = i
+            )
+        }
+        return out
+    }
+}
+
 private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> {
     if (CircleNewApi.handles(url)) return withContext(Dispatchers.IO) { CircleNewApi.scan(url, timeoutMs) }
+    if (KhulnaplexSite.handles(url)) return withContext(Dispatchers.IO) { KhulnaplexSite.scan(url, timeoutMs) }
     if (!url.contains(MULTI_URL_SEPARATOR)) return scanSingleFolder(url, timeoutMs)
     // একাধিক লিংক: সবগুলো একসাথে (parallel) লোড করে merge; একই নামের আইটেম একবারই আসবে
     val parts = url.split(MULTI_URL_SEPARATOR).map { it.trim() }.filter { it.isNotBlank() }
@@ -1413,6 +1566,14 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
                 if (CircleNewApi.handles(category.url)) {
                     CircleNewApi.search(query, category.url).forEach { entry ->
                         if (found.size < 80 && seen.add(entry.url)) {
+                            found.add(SearchHit(entry.name, entry.url, null, category.name, false))
+                        }
+                    }
+                    return@async
+                }
+                if (KhulnaplexSite.handles(category.url)) {
+                    KhulnaplexSite.allPages(category.url).forEach { entry ->
+                        if (found.size < 80 && matchesQuery(entry.name) && seen.add(entry.url)) {
                             found.add(SearchHit(entry.name, entry.url, null, category.name, false))
                         }
                     }

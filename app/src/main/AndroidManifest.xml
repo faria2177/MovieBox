@@ -5,7 +5,8 @@
 
     <application
         android:icon="@mipmap/ic_launcher"
-        android:label="BeeGear"
+        android:banner="@drawable/tv_banner"
+        android:label="MBox Pro"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true">
 

@@ -1,2 +1,2 @@
-# BeeGear
+# MBox Pro
 BDIX SamOnline

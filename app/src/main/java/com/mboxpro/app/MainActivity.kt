@@ -1,4 +1,4 @@
-package com.beegear.app
+package com.mboxpro.app
 
 import android.app.Activity
 import android.content.ContentValues
@@ -283,7 +283,7 @@ private fun Modifier.appSurfaceBackground(): Modifier {
 }
 
 /* ============================================================================
-   SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (AUTO-RESUME ON ABORT + MOVIES/BeeGear)
+   SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (AUTO-RESUME ON ABORT + MOVIES/MBox Pro)
    ============================================================================ */
 private enum class DownloadStatus {
     QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED
@@ -309,12 +309,12 @@ private object DownloadQueueManager {
     private var appRef: Context? = null
 
     private fun stateFile(context: Context): File {
-        val dir = File(context.filesDir, "beegear_data").apply { if (!exists()) mkdirs() }
+        val dir = File(context.filesDir, "mboxpro_data").apply { if (!exists()) mkdirs() }
         return File(dir, "download_queue.json")
     }
 
     private fun tempFile(context: Context, fileName: String): File {
-        val dir = File(context.filesDir, "beegear_dl_temp").apply { if (!exists()) mkdirs() }
+        val dir = File(context.filesDir, "mboxpro_dl_temp").apply { if (!exists()) mkdirs() }
         return File(dir, "$fileName.part")
     }
 
@@ -395,7 +395,7 @@ private object DownloadQueueManager {
         } catch (_: Exception) {
             rawTitle.ifBlank { "video.mp4" }
         }
-        return decoded.replace(Regex("[\\\\/:*?\"<>|]+"), "_").trim().ifBlank { "beegear_video.mp4" }
+        return decoded.replace(Regex("[\\\\/:*?\"<>|]+"), "_").trim().ifBlank { "mboxpro_video.mp4" }
     }
 
     fun enqueue(context: Context, video: MediaEntry) {
@@ -493,7 +493,7 @@ private object DownloadQueueManager {
             tempFile(context, item.fileName).delete()
             val publicFile = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                "BeeGear/${item.fileName}"
+                "MBox Pro/${item.fileName}"
             )
             if (publicFile.exists()) publicFile.delete()
         } catch (_: Exception) {
@@ -591,7 +591,7 @@ private object DownloadQueueManager {
                 }
                 persist(appCtx)
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(appCtx, "সম্পন্ন: Movies/BeeGear/${taskSnapshot.fileName}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appCtx, "সম্পন্ন: Movies/MBox Pro/${taskSnapshot.fileName}", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 val msg = e.localizedMessage ?: "Download interrupted"
@@ -651,7 +651,7 @@ private object DownloadQueueManager {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Video.Media.MIME_TYPE, guessVideoMime(fileName))
-                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/BeeGear")
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/MBox Pro")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -672,7 +672,7 @@ private object DownloadQueueManager {
 
         val moviesDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-            "BeeGear"
+            "MBox Pro"
         ).apply { if (!exists()) mkdirs() }
         val destFile = File(moviesDir, fileName)
         if (destFile.exists()) destFile.delete()
@@ -726,11 +726,11 @@ private object InternalStorageStore {
     }
 
     private fun dataDir(context: Context): File {
-        return File(context.filesDir, "beegear_data").apply { if (!exists()) mkdirs() }
+        return File(context.filesDir, "mboxpro_data").apply { if (!exists()) mkdirs() }
     }
 
     private fun thumbDir(context: Context): File {
-        return File(context.filesDir, "beegear_thumbnails").apply { if (!exists()) mkdirs() }
+        return File(context.filesDir, "mboxpro_thumbnails").apply { if (!exists()) mkdirs() }
     }
 
     private fun mapFile(context: Context): File {
@@ -863,19 +863,63 @@ private fun readRecommendationList(raw: String?): List<Recommendation> {
     }
 }
 
-private val categories = listOf(
-    Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
-    Category("English Movies (Circle 2)", "http://index2.circleftp.net/FILE/English%20Movies/"),
-    Category("English Movies (Circle)", "http://index.circleftp.net/FILE/English%20Movies/"),
-    Category("English Movies 1080p", "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"),
-    Category("IMDb Top 250", "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"),
-    Category("Hindi Movies", "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"),
-    Category("South Indian Hindi Dubbed", "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/"),
-    Category("TV & Web Series", "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"),
-    Category("Anime & Cartoon", "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"),
-    Category("Korean TV & Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
-    Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
+/* ============================================================================
+   SERVERS — প্রতিটি সার্ভারের নিজস্ব লোগো ব্যাজ ও ক্যাটাগরি লিস্ট
+   ============================================================================ */
+data class MediaServer(
+    val id: String,
+    val name: String,
+    val shortLogo: String,
+    val logoColor: Color,
+    val categories: List<Category>
 )
+
+private val servers = listOf(
+    MediaServer(
+        id = "dhakaflix",
+        name = "DHAKA-FLIX",
+        shortLogo = "DF",
+        logoColor = Color(0xFFE53935),
+        categories = listOf(
+            Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
+            Category("English Movies 1080p", "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"),
+            Category("IMDb Top 250", "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"),
+            Category("Hindi Movies", "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"),
+            Category("South Indian Hindi Dubbed", "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/"),
+            Category("TV & Web Series", "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"),
+            Category("Anime & Cartoon", "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"),
+            Category("Korean TV & Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
+            Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
+        )
+    ),
+    MediaServer(
+        id = "circle",
+        name = "Circle FTP",
+        shortLogo = "C1",
+        logoColor = Color(0xFF1E88E5),
+        categories = listOf(
+            Category("English Movies", "http://index.circleftp.net/FILE/English%20Movies/")
+        )
+    ),
+    MediaServer(
+        id = "circle2",
+        name = "Circle FTP 2",
+        shortLogo = "C2",
+        logoColor = Color(0xFF43A047),
+        categories = listOf(
+            Category("English Movies", "http://index2.circleftp.net/FILE/English%20Movies/")
+        )
+    )
+)
+
+private var selectedServerId by mutableStateOf("dhakaflix")
+
+private val currentServer: MediaServer
+    get() = servers.firstOrNull { it.id == selectedServerId } ?: servers.first()
+
+private val categories: List<Category>
+    get() = currentServer.categories
+
 
 private val videoExtensions = listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
 private val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -1204,11 +1248,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        val prefs = getSharedPreferences("beegear_settings", MODE_PRIVATE)
+        val prefs = getSharedPreferences("mboxpro_settings", MODE_PRIVATE)
         appDarkMode = prefs.getBoolean("dark_theme", false)
         selectedPaletteId = prefs.getString("bg_palette", "cool_blue") ?: "cool_blue"
         downloadsEnabled = prefs.getBoolean("downloads_enabled", true)
         downloadOnlyMp4Mkv = prefs.getBoolean("download_only_mp4_mkv", false)
+        selectedServerId = prefs.getString("selected_server", "dhakaflix") ?: "dhakaflix"
         DownloadQueueManager.ensureLoaded(this)
         applySystemBarColors(appDarkMode, bgDark)
 
@@ -1222,7 +1267,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(isDark, currentBg) {
                     applySystemBarColors(isDark, currentBg)
                 }
-                BeeGearApp()
+                MBoxProApp()
             }
         }
     }
@@ -1251,7 +1296,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun BeeGearApp() {
+fun MBoxProApp() {
     val appContext = LocalContext.current
     var tab by remember { mutableStateOf("HOME") }
     var currentTitle by remember { mutableStateOf("") }
@@ -1270,7 +1315,7 @@ fun BeeGearApp() {
     var favorites by remember {
         mutableStateOf(
             readRecommendationList(
-                appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
+                appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
                     .getString("saved_items", "[]")
             )
         )
@@ -1278,7 +1323,7 @@ fun BeeGearApp() {
     var recentlyWatched by remember {
         mutableStateOf(
             readRecommendationList(
-                appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
+                appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
                     .getString("recent_items", "[]")
             )
         )
@@ -1293,7 +1338,7 @@ fun BeeGearApp() {
                     .put("score", item.score)
             )
         }
-        appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
             .edit().putString("recent_items", array.toString()).apply()
     }
 
@@ -1306,7 +1351,7 @@ fun BeeGearApp() {
                     .put("score", item.score)
             )
         }
-        appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
             .edit().putString("saved_items", array.toString()).apply()
     }
 
@@ -1366,10 +1411,12 @@ fun BeeGearApp() {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 DownloadQueueManager.onAppResumed(appContext)
-                if (recommendations.isEmpty()) {
+                if (recommendations.isEmpty() && !recommendationsLoading) {
+                    val serverAtStart = selectedServerId
                     recommendationScope.launch {
                         recommendationsLoading = true
-                        recommendations = loadRecommendations()
+                        val loaded = loadRecommendations()
+                        if (serverAtStart == selectedServerId) recommendations = loaded
                         recommendationsLoading = false
                     }
                 }
@@ -1377,6 +1424,13 @@ fun BeeGearApp() {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(selectedServerId) {
+        recommendationsLoading = true
+        recommendations = emptyList()
+        recommendations = loadRecommendations()
+        recommendationsLoading = false
     }
 
     LaunchedEffect(currentUrl) {
@@ -1480,7 +1534,7 @@ fun BeeGearApp() {
                 isDarkTheme = appDarkMode,
                 onToggleTheme = {
                     appDarkMode = !appDarkMode
-                    appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
+                    appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
                         .edit().putBoolean("dark_theme", appDarkMode).apply()
                 },
                 onOpenSettings = { showSettings = true },
@@ -1492,7 +1546,16 @@ fun BeeGearApp() {
                 onCategory = { stack = emptyList(); openFolder(it.name, it.url) },
                 onOpen = { stack = emptyList(); openFolder(it.title, it.url, it.poster) },
                 onContinueOpen = { item -> playingTitle = item.title; playingUrl = item.url },
-                onSearchClick = { tab = "SEARCH" }
+                onSearchClick = { tab = "SEARCH" },
+                onServerChange = { server ->
+                    if (server.id != selectedServerId) {
+                        selectedServerId = server.id
+                        appContext.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE)
+                            .edit().putString("selected_server", server.id).apply()
+                        goHomeDirectly()
+                        Toast.makeText(appContext, "সার্ভার পরিবর্তন: ${server.name}", Toast.LENGTH_SHORT).show()
+                    }
+                }
             )
         }
 
@@ -1517,7 +1580,7 @@ private fun SettingsScreen(
     onOpenDownloads: () -> Unit
 ) {
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE) }
+    val prefs = remember { context.getSharedPreferences("mboxpro_settings", Context.MODE_PRIVATE) }
     val activeCount = DownloadQueueManager.tasks.count {
         it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED
     }
@@ -1666,7 +1729,7 @@ private fun SettingsScreen(
                 .padding(16.dp)
         ) {
             Text("Download Settings", color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("সেভ লোকেশন: Internal Storage / Movies / BeeGear", color = textMuted, fontSize = 12.sp)
+            Text("সেভ লোকেশন: Internal Storage / Movies / MBox Pro", color = textMuted, fontSize = 12.sp)
             Spacer(Modifier.height(12.dp))
 
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1752,7 +1815,7 @@ private fun DownloadQueueScreen(onBack: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text("Downloads", color = primaryText, fontSize = 23.sp, fontWeight = FontWeight.Black)
-                Text("Movies/BeeGear • একসাথে ১টি ডাউনলোড চলবে", color = textMuted, fontSize = 11.sp)
+                Text("Movies/MBox Pro • একসাথে ১টি ডাউনলোড চলবে", color = textMuted, fontSize = 11.sp)
             }
         }
 
@@ -1803,7 +1866,7 @@ private fun DownloadQueueScreen(onBack: () -> Unit) {
                                         val note = if (task.errorMessage.isNotBlank()) " • ${task.errorMessage}" else ""
                                         "Paused • ${formatBytes(task.downloadedBytes)}$note"
                                     }
-                                    DownloadStatus.COMPLETED -> "Completed • Movies/BeeGear"
+                                    DownloadStatus.COMPLETED -> "Completed • Movies/MBox Pro"
                                     DownloadStatus.FAILED -> "Failed • ${task.errorMessage}"
                                 }
                                 Text(
@@ -1928,7 +1991,8 @@ private fun HomeScreen(
     onOpen: (Recommendation) -> Unit,
     onCategory: (Category) -> Unit,
     onContinueOpen: (Recommendation) -> Unit,
-    onSearchClick: () -> Unit
+    onSearchClick: () -> Unit,
+    onServerChange: (MediaServer) -> Unit
 ) {
     val pageState = rememberScrollState()
     val tabState = rememberScrollState()
@@ -1950,9 +2014,12 @@ private fun HomeScreen(
                 .padding(horizontal = 20.dp, vertical = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Bee", color = primaryText, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
-            Text("Gear", color = accentRed, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+            Text("MBox", color = primaryText, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold)
+            Text(" Pro", color = accentRed, fontSize = 23.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.weight(1f))
+
+            ServerSwitcher(onServerChange = onServerChange)
+            Spacer(Modifier.width(8.dp))
 
             Box(
                 Modifier
@@ -2230,6 +2297,83 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun ServerLogo(server: MediaServer, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(
+                Brush.linearGradient(
+                    listOf(server.logoColor, server.logoColor.copy(alpha = 0.72f))
+                )
+            )
+            .border(1.5.dp, Color.White.copy(alpha = 0.55f), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            server.shortLogo,
+            color = Color.White,
+            fontSize = (size.value * 0.34f).sp,
+            fontWeight = FontWeight.Black
+        )
+    }
+}
+
+@Composable
+private fun ServerSwitcher(onServerChange: (MediaServer) -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val active = currentServer
+    Box {
+        Box(Modifier.clip(CircleShape).clickable { menuOpen = true }) {
+            ServerLogo(active, 38.dp)
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .border(1.dp, primaryText.copy(alpha = 0.2f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("▾", color = primaryText, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+            modifier = Modifier.background(cardDark)
+        ) {
+            Text(
+                "সার্ভার বেছে নিন",
+                color = textMuted,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+            servers.forEach { server ->
+                val isActive = server.id == active.id
+                DropdownMenuItem(
+                    leadingIcon = { ServerLogo(server, 30.dp) },
+                    text = {
+                        Column {
+                            Text(server.name, color = primaryText, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("${server.categories.size} ক্যাটাগরি", color = textMuted, fontSize = 11.sp)
+                        }
+                    },
+                    trailingIcon = {
+                        if (isActive) Text("✓", color = accentRed, fontSize = 16.sp, fontWeight = FontWeight.Black)
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onServerChange(server)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun GlassCategorySection(
     title: String,
     items: List<Recommendation>,
@@ -2279,7 +2423,7 @@ private fun GlassCategorySection(
                         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(tagDark)) {
                             if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
                             else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("BeeGear", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                Text("MBox Pro", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                             }
                         }
                         Text(
@@ -2299,7 +2443,7 @@ private fun GlassCategorySection(
 }
 
 /* ============================================================================
-   2. DETAILS & FOLDER SCREEN (IN-FOLDER SEARCH + BeeGear HOME BUTTON)
+   2. DETAILS & FOLDER SCREEN (IN-FOLDER SEARCH + MBox Pro HOME BUTTON)
    ============================================================================ */
 @Composable
 private fun MediaDetailsScreen(
@@ -2367,13 +2511,13 @@ private fun MediaDetailsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Bee",
+                            "MBox",
                             color = Color(0xFFF6F3EE),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 15.sp
                         )
                         Text(
-                            "Gear",
+                            " Pro",
                             color = Color(0xFFD99B48),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 15.sp
@@ -2698,7 +2842,7 @@ private fun FolderCard(folder: MediaEntry, modifier: Modifier, onClick: () -> Un
             contentAlignment = Alignment.Center
         ) {
             if (poster != null) NetworkPoster(poster!!, Modifier.fillMaxSize())
-            else Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 12.sp)
+            else Text("MBOX PRO", color = accentRed, fontWeight = FontWeight.Black, fontSize = 12.sp)
         }
         Text(
             folder.name,
@@ -2894,7 +3038,7 @@ private fun TrendingOrSavedScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
-                                else Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black)
+                                else Text("MBOX PRO", color = accentRed, fontWeight = FontWeight.Black)
                             }
                             Text(
                                 item.title,
@@ -3009,7 +3153,7 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
         Image(bitmap!!.asImageBitmap(), null, modifier, contentScale = ContentScale.Crop)
     } else {
         Box(modifier.background(tagDark), contentAlignment = Alignment.Center) {
-            Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
+            Text("MBOX PRO", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
         }
     }
 }

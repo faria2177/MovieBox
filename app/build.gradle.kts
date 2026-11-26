@@ -6,23 +6,23 @@ plugins {
 }
 
 android {
-    namespace = "com.beegear.app"
+    namespace = "com.mboxpro.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.beegear.app"
+        applicationId = "com.mboxpro.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.1"
+        versionCode = 5
+        versionName = "1.4.0"
     }
 
-    val hasReleaseKey = file("beegear.jks").let { it.exists() && it.length() > 0 } &&
+    val hasReleaseKey = file("mboxpro.jks").let { it.exists() && it.length() > 0 } &&
         !System.getenv("KEYSTORE_PASSWORD").isNullOrBlank()
 
     signingConfigs {
         create("release") {
-            storeFile = file("beegear.jks")
+            storeFile = file("mboxpro.jks")
             storePassword = System.getenv("KEYSTORE_PASSWORD")
             keyAlias = System.getenv("KEY_ALIAS")
             keyPassword = System.getenv("KEY_PASSWORD")
@@ -34,6 +34,16 @@ android {
             isMinifyEnabled = false
             // Secrets না থাকলে debug key দিয়ে সাইন হবে, যাতে build fail না করে
             signingConfig = if (hasReleaseKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+        }
+    }
+
+    // আলাদা APK: Android TV 32-bit (armeabi-v7a), 64-bit (arm64-v8a) এবং সব ডিভাইসের জন্য universal
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = true
         }
     }
 

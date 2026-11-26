@@ -32,7 +32,7 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > app/beegear.jks
+            echo "$KEYSTORE_BASE64" | base64 -d > app/mboxpro.jks
           else
             echo "KEYSTORE_BASE64 secret নেই — debug key দিয়ে সাইন হবে"
           fi
@@ -50,12 +50,18 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle assembleRelease
 
-      - name: Rename APK
-        run: mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/BeeGear-v${{ steps.get_version.outputs.version }}.apk
+      - name: Rename APKs
+        run: |
+          V=${{ steps.get_version.outputs.version }}
+          D=app/build/outputs/apk/release
+          mv $D/app-armeabi-v7a-release.apk $D/MBoxPro-v$V-AndroidTV-32bit-armeabi-v7a.apk
+          mv $D/app-arm64-v8a-release.apk   $D/MBoxPro-v$V-64bit-arm64-v8a.apk
+          mv $D/app-universal-release.apk   $D/MBoxPro-v$V-universal.apk
+          ls -la $D
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get_version.outputs.version }}-${{ github.run_number }}
-          name: BeeGear Release v${{ steps.get_version.outputs.version }} (Build ${{ github.run_number }})
-          files: app/build/outputs/apk/release/BeeGear-v${{ steps.get_version.outputs.version }}.apk
+          name: MBox Pro Release v${{ steps.get_version.outputs.version }} (Build ${{ github.run_number }})
+          files: app/build/outputs/apk/release/MBoxPro-v*.apk

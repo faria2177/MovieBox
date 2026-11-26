@@ -402,7 +402,14 @@ private object DownloadQueueManager {
         } catch (_: Exception) {
             rawTitle.ifBlank { "video.mp4" }
         }
-        return decoded.replace(Regex("[\\\\/:*?\"<>|]+"), "_").trim().ifBlank { "mboxpro_video.mp4" }
+        val safe = decoded.replace(Regex("[\\\\/:*?\"<>|]+"), "_").trim().ifBlank { "mboxpro_video" }
+        val urlExt = try {
+            URL(url).path.substringAfterLast("/").substringAfterLast(".", "").lowercase()
+        } catch (_: Exception) {
+            ""
+        }
+        val hasVideoExt = videoExtensions.any { safe.lowercase().endsWith(it) }
+        return if (hasVideoExt) safe else safe + "." + urlExt.ifBlank { "mp4" }
     }
 
     fun enqueue(context: Context, video: MediaEntry) {
@@ -925,6 +932,15 @@ private val servers = listOf(
                 "http://ftp7.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/"
             )
         )
+    ),
+    MediaServer(
+        id = "circlenew",
+        name = "Circle FTP New",
+        shortLogo = "CN",
+        logoColor = Color(0xFF8E24AA),
+        categories = listOf(
+            Category("English Movies", "http://new.circleftp.net/category/20")
+        )
     )
 )
 
@@ -978,7 +994,182 @@ private fun yearPriorityBoost(name: String): Long {
     return (years - 1990).toLong() * 86_400_000L * 365L
 }
 
+/* ============================================================================
+   CIRCLE FTP NEW — new.circleftp.net JSON API (ওয়েবসাইট নিজেও এই API ব্যবহার করে)
+   ক্যাটাগরি -> পোস্ট (ফোল্ডার) -> সিজন (ফোল্ডার) -> ভিডিও; পোস্টার ছবি image entry হিসেবে আসে
+   ============================================================================ */
+private object CircleNewApi {
+    private const val SITE_HOST = "new.circleftp.net"
+    private const val SITE = "http://new.circleftp.net"
+    private const val API = "http://new.circleftp.net:5000/api"
+    private const val IMAGE_BASE = "http://new.circleftp.net:5000/uploads/"
+    private const val PAGE_SIZE = 40
+
+    fun handles(url: String): Boolean = try {
+        val u = URL(url)
+        u.host.equals(SITE_HOST, ignoreCase = true) && u.port <= 0 &&
+            (u.path.startsWith("/category/") || u.path.startsWith("/content/"))
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun categoryId(url: String): String? =
+        Regex("/category/([^/?#]+)").find(url)?.groupValues?.get(1)
+
+    private fun getJson(path: String, timeoutMs: Int): JSONObject {
+        val conn = (URL(API + path).openConnection() as HttpURLConnection).apply {
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "Mozilla/5.0")
+        }
+        try {
+            if (conn.responseCode !in 200..299) throw Exception("Circle FTP API HTTP ${conn.responseCode}")
+            return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun imageUrl(name: String): String? =
+        name.trim().takeIf { it.isNotBlank() }?.let { if (it.startsWith("http")) it else IMAGE_BASE + Uri.encode(it) }
+
+    private fun cleanLink(link: String): String = link.trim().replace(" ", "%20")
+
+    private fun postTitle(p: JSONObject): String {
+        val name = p.optString("name").ifBlank { p.optString("title") }.ifBlank { "Untitled" }.trim()
+        val year = p.optString("year").trim()
+        val quality = p.optString("quality").trim()
+        return buildString {
+            append(name)
+            if (year.isNotBlank() && !name.contains(year)) append(" ($year)")
+            if (quality.isNotBlank()) append(" [$quality]")
+        }
+    }
+
+    private fun postsToEntries(arr: JSONArray?, topOrder: Int): List<MediaEntry> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<MediaEntry>()
+        for (i in 0 until arr.length()) {
+            val p = arr.optJSONObject(i) ?: continue
+            val type = p.optString("type")
+            if (type != "singleVideo" && type != "series") continue
+            val id = p.opt("id")?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: continue
+            list += MediaEntry(
+                name = postTitle(p),
+                url = "$SITE/content/$id",
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = topOrder - i // API নতুন থেকে পুরনো দেয়; নতুনটির স্কোর বেশি
+            )
+        }
+        return list
+    }
+
+    fun scan(url: String, timeoutMs: Int): Result<List<MediaEntry>> = try {
+        val path = URL(url).path
+        Result.success(if (path.startsWith("/category/")) scanCategory(url, timeoutMs) else scanPost(path, timeoutMs))
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+
+    private fun scanCategory(url: String, timeoutMs: Int): List<MediaEntry> {
+        val id = categoryId(url) ?: throw Exception("Invalid category link")
+        val page = Regex("[?&]page=(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val d = getJson("/posts?order=desc&page=$page&limit=$PAGE_SIZE&categoryExact=${Uri.encode(id)}", timeoutMs)
+        val entries = postsToEntries(d.optJSONArray("posts"), 100_000 - (page - 1) * PAGE_SIZE).toMutableList()
+        val pages = d.optJSONObject("pagination")?.optInt("pages", page) ?: page
+        if (page < pages) {
+            entries += MediaEntry(
+                name = "» আরও দেখুন (পেজ ${page + 1}/$pages)",
+                url = "$SITE/category/$id?page=${page + 1}",
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = 0
+            )
+        }
+        return entries
+    }
+
+    private fun scanPost(path: String, timeoutMs: Int): List<MediaEntry> {
+        val m = Regex("^/content/([^/]+)(?:/season/(\\d+))?").find(path) ?: throw Exception("Invalid content link")
+        val id = m.groupValues[1]
+        val seasonIdx = m.groupValues[2].toIntOrNull()
+        val p = getJson("/posts/${Uri.encode(id)}", timeoutMs)
+        val out = mutableListOf<MediaEntry>()
+        imageUrl(p.optString("image").ifBlank { p.optString("imageSm") })?.let {
+            out += MediaEntry(name = "poster", url = it, isFolder = false, isVideo = false, isImage = true)
+        }
+
+        if (p.optString("type") == "singleVideo") {
+            val link = cleanLink(p.optString("content"))
+            if (link.startsWith("http")) {
+                val fileName = try {
+                    URLDecoder.decode(URL(link).path.substringAfterLast("/"), "UTF-8")
+                } catch (_: Exception) {
+                    ""
+                }
+                out += MediaEntry(
+                    name = fileName.ifBlank { postTitle(p) },
+                    url = link,
+                    isFolder = false,
+                    isVideo = true,
+                    isImage = false
+                )
+            }
+            return out
+        }
+
+        val seasons = p.optJSONArray("content") ?: return out
+        if (seasonIdx == null && seasons.length() > 1) {
+            for (i in 0 until seasons.length()) {
+                val season = seasons.optJSONObject(i) ?: continue
+                val count = season.optJSONArray("episodes")?.length() ?: 0
+                out += MediaEntry(
+                    name = "${season.optString("seasonName").ifBlank { "Season ${i + 1}" }} ($count)",
+                    url = "$SITE/content/$id/season/$i",
+                    isFolder = true,
+                    isVideo = false,
+                    isImage = false,
+                    sourceOrder = seasons.length() - i
+                )
+            }
+            return out
+        }
+
+        val season = seasons.optJSONObject(seasonIdx ?: 0) ?: return out
+        val episodes = season.optJSONArray("episodes") ?: return out
+        for (i in 0 until episodes.length()) {
+            val ep = episodes.optJSONObject(i) ?: continue
+            val link = cleanLink(ep.optString("link"))
+            if (!link.startsWith("http")) continue
+            out += MediaEntry(
+                name = ep.optString("title").ifBlank { "Episode ${i + 1}" },
+                url = link,
+                isFolder = false,
+                isVideo = true,
+                isImage = false,
+                sourceOrder = i
+            )
+        }
+        return out
+    }
+
+    /** API-র searchTerm দিয়ে নির্দিষ্ট ক্যাটাগরির ভেতরে সার্চ */
+    fun search(query: String, categoryUrl: String, timeoutMs: Int = 12000): List<MediaEntry> = try {
+        val id = categoryId(categoryUrl)
+        val cat = if (id != null) "&categoryExact=${Uri.encode(id)}" else ""
+        val d = getJson("/posts?order=desc&page=1&limit=40&searchTerm=${Uri.encode(query)}$cat", timeoutMs)
+        postsToEntries(d.optJSONArray("posts"), 1000)
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
 private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> {
+    if (CircleNewApi.handles(url)) return withContext(Dispatchers.IO) { CircleNewApi.scan(url, timeoutMs) }
     if (!url.contains(MULTI_URL_SEPARATOR)) return scanSingleFolder(url, timeoutMs)
     // একাধিক লিংক: সবগুলো একসাথে (parallel) লোড করে merge; একই নামের আইটেম একবারই আসবে
     val parts = url.split(MULTI_URL_SEPARATOR).map { it.trim() }.filter { it.isNotBlank() }
@@ -1115,17 +1306,22 @@ private suspend fun scanCategoryRecommendations(category: Category): List<Recomm
             val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
 
             if (childItems.any { it.isVideo }) {
-                if (seenUrls.add(child.url)) {
+                val childIsSeason = child.name.contains("season", ignoreCase = true) ||
+                    child.name.matches(Regex("^(s\\d+|part\\s*\\d+).*", RegexOption.IGNORE_CASE))
+                val childTargetUrl = if (childIsSeason) folder.url else child.url
+                val childTargetTitle = if (childIsSeason) folder.name else child.name
+                if (seenUrls.add(childTargetUrl)) {
                     results.add(
                         Recommendation(
-                            title = child.name,
-                            url = child.url,
+                            title = childTargetTitle,
+                            url = childTargetUrl,
                             poster = childPoster,
                             subtitle = category.name,
                             score = latestFreshnessScore(child, childMaxDate)
                         )
                     )
                 }
+                if (childIsSeason) break
                 continue
             }
 
@@ -1214,6 +1410,14 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
     coroutineScope {
         val tasks = categories.map { category ->
             async(Dispatchers.IO) {
+                if (CircleNewApi.handles(category.url)) {
+                    CircleNewApi.search(query, category.url).forEach { entry ->
+                        if (found.size < 80 && seen.add(entry.url)) {
+                            found.add(SearchHit(entry.name, entry.url, null, category.name, false))
+                        }
+                    }
+                    return@async
+                }
                 val root = scanFolder(category.url, 12000).getOrNull().orEmpty()
                 for (entry in root) {
                     if (found.size >= 80) break

@@ -121,7 +121,14 @@ import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
-data class Category(val name: String, val url: String)
+/** একটি ক্যাটাগরিতে এক বা একাধিক লিংক থাকতে পারে; সব লিংকের ডেটা একসাথে মিলিয়ে (merge) দেখানো হয়। */
+data class Category(val name: String, val urls: List<String>) {
+    constructor(name: String, vararg urls: String) : this(name, urls.toList())
+    /** একাধিক লিংক হলে "|" দিয়ে জোড়া থাকে; scanFolder() এটাকে ভেঙে সব সার্ভার থেকে লোড করে */
+    val url: String get() = urls.joinToString(MULTI_URL_SEPARATOR)
+}
+
+private const val MULTI_URL_SEPARATOR = "|"
 data class MediaEntry(
     val name: String,
     val url: String,
@@ -895,19 +902,28 @@ private val servers = listOf(
     MediaServer(
         id = "circle",
         name = "Circle FTP",
-        shortLogo = "C1",
+        shortLogo = "CF",
         logoColor = Color(0xFF1E88E5),
         categories = listOf(
-            Category("English Movies", "http://index.circleftp.net/FILE/English%20Movies/")
-        )
-    ),
-    MediaServer(
-        id = "circle2",
-        name = "Circle FTP 2",
-        shortLogo = "C2",
-        logoColor = Color(0xFF43A047),
-        categories = listOf(
-            Category("English Movies", "http://index2.circleftp.net/FILE/English%20Movies/")
+            Category("English Movies", "http://index2.circleftp.net/FILE/English%20Movies/", "http://index.circleftp.net/FILE/English%20Movies/"),
+            Category("Animation Movies", "http://ftp5.circleftp.net/FILE/Animation%20Movies/"),
+            Category("Animation Dubbed Movies", "http://ftp5.circleftp.net/FILE/Animation%20Dubbed%20Movies/"),
+            Category("English & Foreign Dubbed Movies", "http://index2.circleftp.net/FILE/English%20%26%20Foreign%20Dubbed%20Movies/", "http://index.circleftp.net/FILE/English%20%26%20Foreign%20Dubbed%20Movies/"),
+            Category("Foreign Language Movies", "http://ftp5.circleftp.net/FILE/Foreign%20Language%20Movies/"),
+            Category("Hindi Movies", "http://index1.circleftp.net/FILE/Hindi%20Movies/"),
+            Category("Tamil Telugu & Others", "http://ftp13.circleftp.net/FILE/Tamil%20Telugu%20%26%20Others/", "http://ftp17.circleftp.net/FILE/Tamil%20Telugu%20%26%20Others/"),
+            Category("Hindi TV Series", "http://ftp8.circleftp.net/FILE/Indian%20TV%20Shows/"),
+            Category("Dubbed TV Series", "http://ftp16.circleftp.net/FILE/Dubbed%20TV%20Series%20%26%20Shows/"),
+            Category(
+                "English TV Series",
+                "http://ftp4.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp6.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp9.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp10.circleftp.net/FILE/File/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp12.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp11.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/",
+                "http://ftp7.circleftp.net/FILE/English%20%26%20Foreign%20TV%20Series/"
+            )
         )
     )
 )
@@ -962,7 +978,26 @@ private fun yearPriorityBoost(name: String): Long {
     return (years - 1990).toLong() * 86_400_000L * 365L
 }
 
-private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> = withContext(Dispatchers.IO) {
+private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> {
+    if (!url.contains(MULTI_URL_SEPARATOR)) return scanSingleFolder(url, timeoutMs)
+    // একাধিক লিংক: সবগুলো একসাথে (parallel) লোড করে merge; একই নামের আইটেম একবারই আসবে
+    val parts = url.split(MULTI_URL_SEPARATOR).map { it.trim() }.filter { it.isNotBlank() }
+    val results = coroutineScope {
+        parts.map { part -> async(Dispatchers.IO) { scanSingleFolder(part, timeoutMs) } }.awaitAll()
+    }
+    val ok = results.mapNotNull { it.getOrNull() }
+    if (ok.isEmpty()) {
+        return Result.failure(results.firstOrNull()?.exceptionOrNull() ?: Exception("All servers failed"))
+    }
+    var seq = 0
+    val merged = ok.flatten()
+        .distinctBy { (if (it.isFolder) "d:" else "f:") + it.name.trim().trimEnd('/').lowercase() }
+        .map { it.copy(sourceOrder = seq++) }
+        .sortedWith(compareByDescending<MediaEntry> { it.isFolder }.thenBy { it.name.lowercase() })
+    return Result.success(merged)
+}
+
+private suspend fun scanSingleFolder(url: String, timeoutMs: Int): Result<List<MediaEntry>> = withContext(Dispatchers.IO) {
     try {
         val doc = Jsoup.connect(url).userAgent("Mozilla/5.0").timeout(timeoutMs).ignoreContentType(true).get()
         val host = URL(url).host

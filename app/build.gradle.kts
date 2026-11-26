@@ -13,8 +13,8 @@ android {
         applicationId = "com.mboxpro.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.9.1"
+        versionCode = 14
+        versionName = "1.9.2"
     }
 
     val hasReleaseKey = file("mboxpro.jks").let { it.exists() && it.length() > 0 } &&

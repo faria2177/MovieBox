@@ -71,6 +71,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -110,6 +111,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -1359,6 +1362,10 @@ private object NaturalBdApi {
     fun posterHint(url: String): String? = posterHints[url]
     private val streamExts = videoExtensions + ".m3u8"
 
+    /** এই সার্ভারের হলে সাইটের হোমপেজ (pass কুকি নেওয়ার জন্য) */
+    fun warmupUrlFor(categoryUrl: String?): String? =
+        if (categoryUrl != null && handles(categoryUrl)) origin(categoryUrl) + "/" else null
+
     /** মুভি/সিরিজের পেজ — এগুলো অ্যাপের ভেতরে সাইটের নিজের পেজ (WebView) হিসেবে খোলে, লগইন ও প্লেয়ার সাইটের */
     fun isTitlePage(url: String): Boolean = handles(url) &&
         Regex("^/(movie|series)/\\d+/?$").matches(try { URL(url).path } catch (_: Exception) { "" })
@@ -2046,6 +2053,7 @@ fun MBoxProApp() {
     var showSettings by remember { mutableStateOf(false) }
     var showDownloads by remember { mutableStateOf(false) }
     var webPageUrl by remember { mutableStateOf<String?>(null) }
+    var siteWarmupUrl by remember { mutableStateOf<String?>(null) }
     var recommendations by remember { mutableStateOf(emptyList<Recommendation>()) }
     var recommendationsLoading by remember { mutableStateOf(true) }
     var favorites by remember {
@@ -2171,6 +2179,13 @@ fun MBoxProApp() {
     LaunchedEffect(selectedServerId) {
         recommendationsLoading = true
         recommendations = emptyList()
+        // Natural BD: API-র জন্য সাইটের "pass" কুকি লাগে — লুকানো WebView-এ একবার সাইট খুলে নেওয়া
+        val warmup = NaturalBdApi.warmupUrlFor(currentServer.categories.firstOrNull()?.url)
+        if (warmup != null) {
+            siteWarmupUrl = warmup
+            withTimeoutOrNull(15_000) { snapshotFlow { siteWarmupUrl }.first { it == null } }
+            siteWarmupUrl = null
+        }
         recommendations = loadRecommendations()
         recommendationsLoading = false
     }
@@ -2301,6 +2316,10 @@ fun MBoxProApp() {
                     }
                 }
             )
+        }
+
+        siteWarmupUrl?.let { warm ->
+            HiddenSiteWarmup(warm) { siteWarmupUrl = null }
         }
 
         if (webPageUrl == null && playingUrl == null && currentUrl.isBlank() && !showSettings && !showDownloads) {
@@ -3900,6 +3919,38 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
             Text("MBOX PRO", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
         }
     }
+}
+
+@Composable
+private fun HiddenSiteWarmup(url: String, onDone: () -> Unit) {
+    var finished by remember(url) { mutableStateOf(false) }
+    val finish = {
+        if (!finished) {
+            finished = true
+            try { CookieManager.getInstance().flush() } catch (_: Exception) { }
+            onDone()
+        }
+    }
+    AndroidView(
+        factory = { ctx ->
+            WebView(ctx).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                        // পেজের JavaScript নিজের কুকি/pass সেট করার জন্য একটু সময়
+                        view?.postDelayed({ finish() }, 3000)
+                    }
+                }
+                loadUrl(url)
+            }
+        },
+        onRelease = { it.stopLoading(); it.destroy() },
+        modifier = Modifier.size(1.dp).alpha(0f)
+    )
 }
 
 /* ============================================================================

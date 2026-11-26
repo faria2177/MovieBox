@@ -1378,53 +1378,61 @@ private object NaturalBdApi {
     private const val BROWSER_UA =
         "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-    /** ব্রাউজারের মতো হেডার দিয়ে অনুরোধ; https না চললে http দিয়ে আবার চেষ্টা */
+    /** ব্রাউজারের মতো হেডার দিয়ে অনুরোধ; redirect (http<->https সহ) নিজে অনুসরণ করে; https না চললে http দিয়েও চেষ্টা */
     private fun getJson(url: String, timeoutMs: Int): Any {
         val attempts = if (url.startsWith("https://")) listOf(url, "http://" + url.removePrefix("https://")) else listOf(url)
-        var lastError: Exception? = null
+        val errors = mutableListOf<String>()
         for (target in attempts) {
             try {
-                return fetchJsonOnce(target, timeoutMs)
+                return fetchJsonFollowing(target, timeoutMs)
             } catch (e: Exception) {
-                lastError = e
+                errors += "${target.substringBefore("://")}: ${e.message ?: e.javaClass.simpleName}"
             }
         }
-        throw lastError ?: Exception("Natural BD API failed")
+        throw Exception(errors.joinToString(" | ").ifBlank { "Natural BD API failed" })
     }
 
-    private fun fetchJsonOnce(url: String, timeoutMs: Int): Any {
-        val u = URL(url)
-        val conn = (u.openConnection() as HttpURLConnection).apply {
-            connectTimeout = timeoutMs
-            readTimeout = timeoutMs
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", BROWSER_UA)
-            setRequestProperty("Accept", "application/json, text/plain, */*")
-            setRequestProperty("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
-            setRequestProperty("Referer", "${u.protocol}://${u.host}/")
-            setRequestProperty("Origin", "${u.protocol}://${u.host}")
-            setRequestProperty("Sec-Fetch-Site", "same-origin")
-            setRequestProperty("Sec-Fetch-Mode", "cors")
-            setRequestProperty("Sec-Fetch-Dest", "empty")
+    private fun fetchJsonFollowing(startUrl: String, timeoutMs: Int): Any {
+        var current = startUrl
+        repeat(6) {
+            val u = URL(current)
+            val conn = (u.openConnection() as HttpURLConnection).apply {
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", BROWSER_UA)
+                setRequestProperty("Accept", "application/json, text/plain, */*")
+                setRequestProperty("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
+                setRequestProperty("Referer", "${u.protocol}://${u.host}/")
+                setRequestProperty("Sec-Fetch-Site", "same-origin")
+                setRequestProperty("Sec-Fetch-Mode", "cors")
+                setRequestProperty("Sec-Fetch-Dest", "empty")
+                try {
+                    CookieManager.getInstance().getCookie("${u.protocol}://${u.host}")?.let { setRequestProperty("Cookie", it) }
+                } catch (_: Exception) {
+                }
+            }
             try {
-                CookieManager.getInstance().getCookie("${u.protocol}://${u.host}")?.let { setRequestProperty("Cookie", it) }
-            } catch (_: Exception) {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val location = conn.getHeaderField("Location") ?: throw Exception("HTTP $code (no Location)")
+                    current = URL(u, location).toString()
+                    return@repeat
+                }
+                if (code !in 200..299) {
+                    val body = try { conn.errorStream?.bufferedReader()?.use { it.readText() }?.take(120) } catch (_: Exception) { null }
+                    throw Exception("HTTP $code${if (!body.isNullOrBlank()) " — $body" else ""}")
+                }
+                val text = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+                if (!(text.startsWith("{") || text.startsWith("["))) {
+                    throw Exception("JSON-এর বদলে অন্য পেজ এসেছে (${text.take(60)})")
+                }
+                return if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
+            } finally {
+                conn.disconnect()
             }
         }
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                val body = try { conn.errorStream?.bufferedReader()?.use { it.readText() }?.take(120) } catch (_: Exception) { null }
-                throw Exception("Natural BD API HTTP $code${if (!body.isNullOrBlank()) " — $body" else ""}")
-            }
-            val text = conn.inputStream.bufferedReader().use { it.readText() }.trim()
-            if (!(text.startsWith("{") || text.startsWith("["))) {
-                throw Exception("Natural BD: JSON-এর বদলে অন্য পেজ এসেছে (${text.take(60)})")
-            }
-            return if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
-        } finally {
-            conn.disconnect()
-        }
+        throw Exception("Too many redirects (last: $current)")
     }
 
     private fun absolute(base: String, value: String): String? {

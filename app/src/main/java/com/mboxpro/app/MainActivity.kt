@@ -962,8 +962,8 @@ private val servers = listOf(
         shortLogo = "NB",
         logoColor = Color(0xFF00A86B),
         categories = listOf(
-            Category("Latest Movies", "https://www.naturalbd.com/movies"),
-            Category("Latest TV Series", "https://www.naturalbd.com/tv-series"),
+            Category("All Movies", "https://www.naturalbd.com/movies"),
+            Category("All TV Series", "https://www.naturalbd.com/tv-series"),
             Category("Bangla Movies", "https://www.naturalbd.com/movies?language=Bengali"),
             Category("Hindi Movies", "https://www.naturalbd.com/movies?language=Hindi"),
             Category("South Indian", "https://www.naturalbd.com/movies?language=Malayalam"),
@@ -1035,6 +1035,8 @@ private object CircleNewApi {
     private const val API = "http://new.circleftp.net:5000/api"
     private const val IMAGE_BASE = "http://new.circleftp.net:5000/uploads/"
     private const val PAGE_SIZE = 40
+    private val posterHints = ConcurrentHashMap<String, String>()
+    fun posterHint(url: String): String? = posterHints[url]
 
     fun handles(url: String): Boolean = try {
         val u = URL(url)
@@ -1086,6 +1088,7 @@ private object CircleNewApi {
             val type = p.optString("type")
             if (type != "singleVideo" && type != "series") continue
             val id = p.opt("id")?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: continue
+            imageUrl(p.optString("imageSm").ifBlank { p.optString("image") })?.let { posterHints["$SITE/content/$id"] = it }
             list += MediaEntry(
                 name = postTitle(p),
                 url = "$SITE/content/$id",
@@ -1206,6 +1209,7 @@ private object CircleNewApi {
 private object KhulnaplexSite {
     private const val HOST = "khulnaplex.net"
     private val posterHints = ConcurrentHashMap<String, String>()
+    fun posterHint(url: String): String? = posterHints[url]
     private val videoUrlRegex = Regex(
         "(https?:)?//[^\\s\"'<>]+?\\.(?:mkv|mp4|m4v|avi|webm|mov|ts|m3u8)(?![A-Za-z0-9])(?:\\?[^\\s\"'<>]*)?",
         RegexOption.IGNORE_CASE
@@ -1345,6 +1349,7 @@ private object KhulnaplexSite {
 private object NaturalBdApi {
     private const val PAGE_SIZE = 40
     private val posterHints = ConcurrentHashMap<String, String>()
+    fun posterHint(url: String): String? = posterHints[url]
     private val streamExts = videoExtensions + ".m3u8"
 
     fun handles(url: String): Boolean = try {
@@ -1661,7 +1666,22 @@ private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L
 /* ============================================================================
    RECOMMENDATIONS LOADER (DEEP YEAR / ALPHA / SEASON SUBFOLDER SUPPORT + RETRY)
    ============================================================================ */
+private fun isApiCategory(url: String): Boolean =
+    CircleNewApi.handles(url) || KhulnaplexSite.handles(url) || NaturalBdApi.handles(url)
+
+private fun apiPosterHint(url: String): String? =
+    NaturalBdApi.posterHint(url) ?: KhulnaplexSite.posterHint(url) ?: CircleNewApi.posterHint(url)
+
 private suspend fun scanCategoryRecommendations(category: Category): List<Recommendation> = withContext(Dispatchers.IO) {
+    // API/ওয়েবসাইট সার্ভার: তালিকা থেকেই সরাসরি পোস্টারসহ প্রিভিউ (ভেতরে ঢুকে ভিডিও খোঁজার দরকার নেই)
+    if (isApiCategory(category.url)) {
+        val top = scanFolder(category.url, 15000).getOrNull().orEmpty()
+            .filter { it.isFolder && !it.name.startsWith("»") }
+            .take(12)
+        return@withContext top.map {
+            Recommendation(it.name, it.url, apiPosterHint(it.url), category.name, latestFreshnessScore(it))
+        }
+    }
     val results = mutableListOf<Recommendation>()
     val seenUrls = HashSet<String>()
     val topLevel = scanFolder(category.url, 15000).getOrNull().orEmpty()

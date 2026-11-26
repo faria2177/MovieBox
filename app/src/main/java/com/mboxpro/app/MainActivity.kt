@@ -955,6 +955,23 @@ private val servers = listOf(
             Category("Tamil / South", "http://khulnaplex.net/movies.php?category=tamil"),
             Category("Dubbed Movies", "http://khulnaplex.net/movies.php?category=dub")
         )
+    ),
+    MediaServer(
+        id = "naturalbd",
+        name = "Natural BD",
+        shortLogo = "NB",
+        logoColor = Color(0xFF00A86B),
+        categories = listOf(
+            Category("Latest Movies", "https://www.naturalbd.com/movies"),
+            Category("Latest TV Series", "https://www.naturalbd.com/tv-series"),
+            Category("Bangla Movies", "https://www.naturalbd.com/movies?language=Bengali"),
+            Category("Hindi Movies", "https://www.naturalbd.com/movies?language=Hindi"),
+            Category("South Indian", "https://www.naturalbd.com/movies?language=Malayalam"),
+            Category("Action & Adventure", "https://www.naturalbd.com/movies?genre=Action"),
+            Category("Animation", "https://www.naturalbd.com/movies?genre=Animation"),
+            Category("Korean Dramas", "https://www.naturalbd.com/tv-series?language=Korean"),
+            Category("Anime", "https://www.naturalbd.com/tv-series?language=Japanese&genre=Animation")
+        )
     )
 )
 
@@ -1320,9 +1337,241 @@ private object KhulnaplexSite {
     }
 }
 
+/* ============================================================================
+   NATURAL BD — www.naturalbd.com (Next.js) JSON API
+   /movies?language=..&genre=..  ->  /api/v1/catalog/browse  ->  /movie/{tmdb} বা /series/{tmdb}
+   সিরিজ: /api/catalog/tv/{id} -> /api/catalog/tv/{id}/season/{n}
+   ============================================================================ */
+private object NaturalBdApi {
+    private const val PAGE_SIZE = 40
+    private val posterHints = ConcurrentHashMap<String, String>()
+    private val streamExts = videoExtensions + ".m3u8"
+
+    fun handles(url: String): Boolean = try {
+        val u = URL(url)
+        u.host.equals("naturalbd.com", true) || u.host.endsWith(".naturalbd.com", true)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun origin(url: String): String = URL(url).let { "${it.protocol}://${it.host}" }
+
+    private fun getJson(url: String, timeoutMs: Int): Any {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "Mozilla/5.0")
+        }
+        try {
+            if (conn.responseCode !in 200..299) throw Exception("Natural BD API HTTP ${conn.responseCode}")
+            val text = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+            return if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun absolute(base: String, value: String): String? {
+        val v = value.trim()
+        if (v.isBlank()) return null
+        return try {
+            val abs = URL(URL(base), v).toString()
+            // সাইটের /tmdbimg/... প্রক্সির বদলে সরাসরি TMDB
+            if (abs.contains("/tmdbimg/t/p/")) "https://image.tmdb.org" + abs.substringAfter("/tmdbimg") else abs
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun query(url: String): Map<String, String> {
+        val q = URL(url).query ?: return emptyMap()
+        return q.split("&").mapNotNull {
+            val k = it.substringBefore("=").trim()
+            val v = URLDecoder.decode(it.substringAfter("=", ""), "UTF-8")
+            if (k.isBlank() || v.isBlank()) null else k to v
+        }.toMap()
+    }
+
+    fun scan(url: String, timeoutMs: Int): Result<List<MediaEntry>> = try {
+        val path = URL(url).path.trimEnd('/')
+        Result.success(
+            when {
+                path == "/movies" || path == "/tv-series" -> browse(url, timeoutMs)
+                path.startsWith("/movie/") -> movie(url, timeoutMs)
+                path.startsWith("/series/") -> series(url, timeoutMs)
+                else -> throw Exception("Unsupported Natural BD link")
+            }
+        )
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+
+    fun browseItems(url: String, timeoutMs: Int): Pair<List<MediaEntry>, String?> {
+        val base = origin(url)
+        val isSeries = URL(url).path.trimEnd('/') == "/tv-series"
+        val params = query(url).toMutableMap()
+        val offset = params.remove("offset")?.toIntOrNull() ?: 0
+        val api = StringBuilder("$base/api/v1/catalog/browse?type=${if (isSeries) "series" else "movie"}")
+        api.append("&sort=").append(Uri.encode(params.remove("sort") ?: "latest"))
+        api.append("&limit=$PAGE_SIZE&offset=$offset")
+        params.forEach { (k, v) -> api.append("&").append(Uri.encode(k)).append("=").append(Uri.encode(v)) }
+
+        val json = getJson(api.toString(), timeoutMs)
+        val items = (json as? JSONObject)?.optJSONArray("items") ?: (json as? JSONArray) ?: JSONArray()
+        val list = mutableListOf<MediaEntry>()
+        for (i in 0 until items.length()) {
+            val it = items.optJSONObject(i) ?: continue
+            val tmdb = it.optLong("tmdb_id", 0L)
+            if (tmdb <= 0L) continue
+            val type = it.optString("media_type").ifBlank { if (isSeries) "series" else "movie" }
+            val pageUrl = if (type == "series") "$base/series/$tmdb" else "$base/movie/$tmdb"
+            absolute(base, it.optString("poster_url"))?.let { p -> posterHints[pageUrl] = p }
+            val title = it.optString("title").ifBlank { "Untitled" }
+            val year = it.opt("year")?.toString()?.takeIf { y -> y.isNotBlank() && y != "null" }.orEmpty()
+            list += MediaEntry(
+                name = if (year.isNotBlank() && !title.contains(year)) "$title ($year)" else title,
+                url = pageUrl,
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = 100_000 - offset - i
+            )
+        }
+        val next = if (items.length() >= PAGE_SIZE) {
+            url.replace(Regex("[?&]offset=\\d+"), "").let { clean ->
+                clean + (if (clean.contains("?")) "&" else "?") + "offset=${offset + PAGE_SIZE}"
+            }
+        } else null
+        return list to next
+    }
+
+    private fun browse(url: String, timeoutMs: Int): List<MediaEntry> {
+        val (items, next) = browseItems(url, timeoutMs)
+        val out = items.toMutableList()
+        if (next != null) {
+            val page = (query(next)["offset"]?.toIntOrNull() ?: 0) / PAGE_SIZE + 1
+            out += MediaEntry(name = "» আরও দেখুন (পেজ $page)", url = next, isFolder = true, isVideo = false, isImage = false, sourceOrder = 0)
+        }
+        return out
+    }
+
+    /** সার্চের জন্য প্রথম কয়েক পেজ */
+    fun allPages(categoryUrl: String, maxPages: Int = 6, timeoutMs: Int = 12000): List<MediaEntry> {
+        val out = mutableListOf<MediaEntry>()
+        var url: String? = categoryUrl
+        var n = 0
+        while (url != null && n < maxPages) {
+            val (items, next) = try { browseItems(url, timeoutMs) } catch (_: Exception) { break }
+            out += items
+            url = next
+            n++
+        }
+        return out
+    }
+
+    private fun posterEntry(pageUrl: String, json: JSONObject?): MediaEntry? {
+        val base = origin(pageUrl)
+        val poster = posterHints[pageUrl]
+            ?: json?.let { absolute(base, it.optString("poster_url")) ?: absolute(base, it.optString("backdrop_url")) }
+            ?: return null
+        return MediaEntry(name = "poster", url = poster, isFolder = false, isVideo = false, isImage = true)
+    }
+
+    /** JSON-এর ভেতরে যেকোনো জায়গায় থাকা ভিডিও/স্ট্রিম লিংক খোঁজা */
+    private fun collectStreams(node: Any?, base: String, out: LinkedHashSet<String>) {
+        when (node) {
+            is JSONObject -> node.keys().forEach { collectStreams(node.opt(it), base, out) }
+            is JSONArray -> for (i in 0 until node.length()) collectStreams(node.opt(i), base, out)
+            is String -> {
+                val v = node.trim()
+                if (!(v.startsWith("http") || v.startsWith("/"))) return
+                val pathPart = v.substringBefore("?").substringBefore("#").lowercase()
+                if (streamExts.any { pathPart.endsWith(it) }) {
+                    absolute(base, v)?.let { out += it.replace(" ", "%20") }
+                }
+            }
+        }
+    }
+
+    private fun videoEntries(links: Collection<String>, fallbackTitle: String): List<MediaEntry> =
+        links.mapIndexed { i, link ->
+            val fileName = try {
+                URLDecoder.decode(URL(link).path.substringAfterLast("/"), "UTF-8")
+            } catch (_: Exception) {
+                ""
+            }
+            MediaEntry(
+                name = fileName.ifBlank { if (links.size > 1) "$fallbackTitle (${i + 1})" else fallbackTitle },
+                url = link,
+                isFolder = false,
+                isVideo = true,
+                isImage = false,
+                sourceOrder = i
+            )
+        }
+
+    private fun movie(url: String, timeoutMs: Int): List<MediaEntry> {
+        val base = origin(url)
+        val id = Regex("/movie/(\\d+)").find(url)?.groupValues?.get(1) ?: throw Exception("Invalid movie link")
+        val details = try { getJson("$base/api/catalog/movie/$id", timeoutMs) as? JSONObject } catch (_: Exception) { null }
+        val links = LinkedHashSet<String>()
+        collectStreams(details, base, links)
+        val out = mutableListOf<MediaEntry>()
+        posterEntry(url, details)?.let { out += it }
+        out += videoEntries(links, details?.optString("title")?.ifBlank { null } ?: "Movie $id")
+        if (details == null && out.isEmpty()) throw Exception("Natural BD: movie details not available")
+        return out
+    }
+
+    private fun series(url: String, timeoutMs: Int): List<MediaEntry> {
+        val base = origin(url)
+        val m = Regex("/series/(\\d+)(?:/season/(\\d+))?").find(url) ?: throw Exception("Invalid series link")
+        val id = m.groupValues[1]
+        val seasonNo = m.groupValues[2].toIntOrNull()
+        val showUrl = "$base/series/$id"
+        val out = mutableListOf<MediaEntry>()
+
+        if (seasonNo == null) {
+            val details = getJson("$base/api/catalog/tv/$id", timeoutMs) as? JSONObject
+            posterEntry(showUrl, details)?.let { out += it }
+            val seasons = details?.optJSONArray("seasons") ?: JSONArray()
+            for (i in 0 until seasons.length()) {
+                val sn = seasons.optJSONObject(i) ?: continue
+                val no = sn.optInt("season_number", 0)
+                if (no <= 0) continue
+                val count = sn.optInt("episode_count", 0)
+                out += MediaEntry(
+                    name = sn.optString("name").ifBlank { "Season $no" } + if (count > 0) " ($count)" else "",
+                    url = "$showUrl/season/$no",
+                    isFolder = true,
+                    isVideo = false,
+                    isImage = false,
+                    sourceOrder = 1000 - no
+                )
+            }
+            return out
+        }
+
+        val season = getJson("$base/api/catalog/tv/$id/season/$seasonNo", timeoutMs) as? JSONObject
+        posterEntry(showUrl, null)?.let { out += it }
+        val episodes = season?.optJSONArray("episodes") ?: JSONArray()
+        for (i in 0 until episodes.length()) {
+            val ep = episodes.optJSONObject(i) ?: continue
+            val links = LinkedHashSet<String>()
+            collectStreams(ep, base, links)
+            val no = ep.optInt("episode_number", i + 1)
+            val label = "E" + no.toString().padStart(2, '0') + (ep.optString("name").takeIf { it.isNotBlank() }?.let { " · $it" } ?: "")
+            out += videoEntries(links, label).map { it.copy(name = label, sourceOrder = no) }
+        }
+        return out
+    }
+}
+
 private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> {
     if (CircleNewApi.handles(url)) return withContext(Dispatchers.IO) { CircleNewApi.scan(url, timeoutMs) }
     if (KhulnaplexSite.handles(url)) return withContext(Dispatchers.IO) { KhulnaplexSite.scan(url, timeoutMs) }
+    if (NaturalBdApi.handles(url)) return withContext(Dispatchers.IO) { NaturalBdApi.scan(url, timeoutMs) }
     if (!url.contains(MULTI_URL_SEPARATOR)) return scanSingleFolder(url, timeoutMs)
     // একাধিক লিংক: সবগুলো একসাথে (parallel) লোড করে merge; একই নামের আইটেম একবারই আসবে
     val parts = url.split(MULTI_URL_SEPARATOR).map { it.trim() }.filter { it.isNotBlank() }
@@ -1566,6 +1815,14 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
                 if (CircleNewApi.handles(category.url)) {
                     CircleNewApi.search(query, category.url).forEach { entry ->
                         if (found.size < 80 && seen.add(entry.url)) {
+                            found.add(SearchHit(entry.name, entry.url, null, category.name, false))
+                        }
+                    }
+                    return@async
+                }
+                if (NaturalBdApi.handles(category.url)) {
+                    NaturalBdApi.allPages(category.url).forEach { entry ->
+                        if (found.size < 80 && matchesQuery(entry.name) && seen.add(entry.url)) {
                             found.add(SearchHit(entry.name, entry.url, null, category.name, false))
                         }
                     }

@@ -20,6 +20,8 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
@@ -964,6 +966,15 @@ private val servers = listOf(
             Category("Animation", "http://khulnaplex.net/movies.php?category=animation"),
             Category("Tamil / South", "http://khulnaplex.net/movies.php?category=tamil"),
             Category("Dubbed Movies", "http://khulnaplex.net/movies.php?category=dub")
+        )
+    ),
+    MediaServer(
+        id = "bdiptv",
+        name = "BD IPTV (Live TV)",
+        shortLogo = "TV",
+        logoColor = Color(0xFF3949AB),
+        categories = listOf(
+            Category("Live TV", "http://tv.bdiptv.net/")
         )
     ),
     MediaServer(
@@ -1959,6 +1970,15 @@ private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L
 /* ============================================================================
    RECOMMENDATIONS LOADER (DEEP YEAR / ALPHA / SEASON SUBFOLDER SUPPORT + RETRY)
    ============================================================================ */
+/** এই সাইটগুলো পুরোটাই অ্যাপের ভেতরের ব্রাউজারে খোলে (নিজস্ব প্লেয়ার/লাইভ টিভি) */
+private val webOnlyHosts = setOf("tv.bdiptv.net")
+
+private fun isWebOnlySite(url: String): Boolean = try {
+    URL(url).host.lowercase() in webOnlyHosts
+} catch (_: Exception) {
+    false
+}
+
 private fun isApiCategory(url: String): Boolean =
     CircleNewApi.handles(url) || KhulnaplexSite.handles(url) || NaturalBdApi.handles(url) || CtgHallApi.handles(url)
 
@@ -1966,6 +1986,7 @@ private fun apiPosterHint(url: String): String? =
     NaturalBdApi.posterHint(url) ?: KhulnaplexSite.posterHint(url) ?: CircleNewApi.posterHint(url) ?: CtgHallApi.posterHint(url)
 
 private suspend fun scanCategoryRecommendations(category: Category): List<Recommendation> = withContext(Dispatchers.IO) {
+    if (isWebOnlySite(category.url)) return@withContext emptyList()
     // API/ওয়েবসাইট সার্ভার: তালিকা থেকেই সরাসরি পোস্টারসহ প্রিভিউ (ভেতরে ঢুকে ভিডিও খোঁজার দরকার নেই)
     if (isApiCategory(category.url)) {
         val top = scanFolder(category.url, 15000).getOrNull().orEmpty()
@@ -2350,6 +2371,10 @@ fun MBoxProApp() {
     fun openFolder(title: String, url: String, poster: String? = null) {
         showSettings = false
         showDownloads = false
+        if (isWebOnlySite(url)) {
+            webPageUrl = url
+            return
+        }
         if (NaturalBdApi.isTitlePage(url)) {
             webPageUrl = NaturalBdApi.webUrlFor(url)
             return
@@ -4199,6 +4224,32 @@ private fun SiteWebScreen(url: String, onClose: () -> Unit) {
     var customView by remember { mutableStateOf<View?>(null) }
     var customCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
     var progress by remember { mutableStateOf(0) }
+    val requestLog = remember { java.util.Collections.synchronizedList(mutableListOf<String>()) }
+
+    fun shareSource() {
+        val wv = webView ?: return
+        wv.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
+            val html = try { JSONArray("[$raw]").getString(0) } catch (_: Exception) { raw ?: "" }
+            val requests = synchronized(requestLog) { requestLog.toList() }.distinct()
+            val text = buildString {
+                append("PAGE: ").append(wv.url).append("\n\n")
+                append("=== NETWORK REQUESTS (").append(requests.size).append(") ===\n")
+                requests.takeLast(400).forEach { append(it).append('\n') }
+                append("\n=== HTML ===\n")
+                append(html.take(150_000))
+            }
+            try {
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Page source: ${wv.url}")
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                context.startActivity(Intent.createChooser(send, "পেজ সোর্স শেয়ার করুন"))
+            } catch (e: Exception) {
+                Toast.makeText(context, "Share failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     BackHandler {
         when {
@@ -4242,7 +4293,19 @@ private fun SiteWebScreen(url: String, onClose: () -> Unit) {
                     keepScreenOn = true
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                    webViewClient = WebViewClient()
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                            request?.url?.toString()?.let { u ->
+                                if (!u.startsWith("data:")) {
+                                    synchronized(requestLog) {
+                                        requestLog.add("${request?.method ?: "GET"} $u")
+                                        if (requestLog.size > 2000) requestLog.removeAt(0)
+                                    }
+                                }
+                            }
+                            return null
+                        }
+                    }
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             progress = newProgress
@@ -4288,6 +4351,20 @@ private fun SiteWebScreen(url: String, onClose: () -> Unit) {
                         .height(3.dp)
                         .background(accentRed)
                 )
+            }
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
+                    .padding(18.dp)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape)
+                    .clickable { shareSource() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("</>", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
             Box(
                 Modifier

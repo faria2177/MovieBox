@@ -967,6 +967,16 @@ private val servers = listOf(
         )
     ),
     MediaServer(
+        id = "ctghall",
+        name = "CTGHALL",
+        shortLogo = "CH",
+        logoColor = Color(0xFFF57C00),
+        categories = listOf(
+            Category("Movies", "https://www.ctghall.com/movies"),
+            Category("TV Shows", "https://www.ctghall.com/tv-shows")
+        )
+    ),
+    MediaServer(
         id = "naturalbd",
         name = "Natural BD",
         shortLogo = "NB",
@@ -1352,6 +1362,223 @@ private object KhulnaplexSite {
 }
 
 /* ============================================================================
+   CTGHALL — www.ctghall.com (Vite SPA), API base "/api/"
+   /api/movies?page=&limit=&fields=  -> {data:[...], current_page, pages}
+   /api/tv-shows/{id}?fields=episodes -> episodes[{id,name,season_number,episode_number}]
+   ভিডিও: /api/stream/video/stream?type=movies|tv_shows&id=
+   ছবি:   /content-images/{movies|tv-shows}/posters/{poster_path}  বা  /api/stream/image/{type}/{id}/poster?size=
+   ============================================================================ */
+private object CtgHallApi {
+    private const val PAGE_SIZE = 30
+    private const val UA =
+        "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    private val posterHints = ConcurrentHashMap<String, String>()
+    private val titleHints = ConcurrentHashMap<String, String>()
+    fun posterHint(url: String): String? = posterHints[url]
+
+    fun handles(url: String): Boolean = try {
+        val u = URL(url)
+        u.host.equals("ctghall.com", true) || u.host.endsWith(".ctghall.com", true)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun origin(url: String): String = URL(url).let { "${it.protocol}://${it.host}" }
+
+    private fun getJson(url: String, timeoutMs: Int): Any {
+        var current = url
+        repeat(6) {
+            val u = URL(current)
+            val conn = (u.openConnection() as HttpURLConnection).apply {
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", UA)
+                setRequestProperty("Accept", "application/json, text/plain, */*")
+                setRequestProperty("Referer", "${u.protocol}://${u.host}/")
+                try {
+                    CookieManager.getInstance().getCookie("${u.protocol}://${u.host}")?.let { setRequestProperty("Cookie", it) }
+                } catch (_: Exception) {
+                }
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    current = URL(u, conn.getHeaderField("Location") ?: throw Exception("HTTP $code")).toString()
+                    return@repeat
+                }
+                if (code !in 200..299) {
+                    val body = try { conn.errorStream?.bufferedReader()?.use { it.readText() }?.take(120) } catch (_: Exception) { null }
+                    throw Exception("CTGHALL API HTTP $code${if (!body.isNullOrBlank()) " — $body" else ""}")
+                }
+                val text = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+                if (!(text.startsWith("{") || text.startsWith("["))) throw Exception("CTGHALL: JSON আসেনি (${text.take(60)})")
+                return if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
+            } finally {
+                conn.disconnect()
+            }
+        }
+        throw Exception("CTGHALL: too many redirects")
+    }
+
+    private fun imageUrl(base: String, id: String, path: String, isTv: Boolean, size: Int = 300): String {
+        val p = path.trim().trimStart('/')
+        return if (p.isNotBlank() && p != "null") {
+            if (p.startsWith("http")) p else "$base/content-images/${if (isTv) "tv-shows" else "movies"}/posters/$p"
+        } else {
+            "$base/api/stream/image/${if (isTv) "tv" else "movie"}/$id/poster?size=$size"
+        }
+    }
+
+    private fun pageOf(url: String) = Regex("[?&]page=(\\d+)").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
+    fun scan(url: String, timeoutMs: Int): Result<List<MediaEntry>> = try {
+        val path = URL(url).path.trimEnd('/')
+        Result.success(
+            when {
+                path == "/movies" || path == "/tv-shows" -> list(url, timeoutMs).let { (items, next) ->
+                    if (next == null) items else items + MediaEntry(
+                        name = "» আরও দেখুন (পেজ ${pageOf(next)})",
+                        url = next,
+                        isFolder = true,
+                        isVideo = false,
+                        isImage = false,
+                        sourceOrder = 0
+                    )
+                }
+                path.startsWith("/movie/") -> movie(url)
+                path.startsWith("/tv/") -> tv(url, timeoutMs)
+                else -> throw Exception("Unsupported CTGHALL link")
+            }
+        )
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+
+    fun list(url: String, timeoutMs: Int): Pair<List<MediaEntry>, String?> {
+        val base = origin(url)
+        val isTv = URL(url).path.trimEnd('/') == "/tv-shows"
+        val page = pageOf(url)
+        val extra = (URL(url).query ?: "").split("&").filter { it.isNotBlank() && !it.startsWith("page=") }
+            .joinToString("") { "&$it" }
+        val api = "$base/api/${if (isTv) "tv-shows" else "movies"}?page=$page&sort_by=DESC&limit=$PAGE_SIZE" +
+            "&fields=${Uri.encode("poster_path,title,original_title,year,release_date,id,tmdb_id")}$extra"
+        val json = getJson(api, timeoutMs)
+        val arr = (json as? JSONObject)?.optJSONArray("data") ?: (json as? JSONArray) ?: JSONArray()
+        val pages = (json as? JSONObject)?.optInt("pages", page) ?: page
+        val out = mutableListOf<MediaEntry>()
+        for (i in 0 until arr.length()) {
+            val it = arr.optJSONObject(i) ?: continue
+            val id = it.opt("id")?.toString()?.takeIf { s -> s.isNotBlank() && s != "null" } ?: continue
+            val title = it.optString("title").ifBlank { it.optString("original_title") }.ifBlank { "Untitled" }
+            val year = it.opt("year")?.toString()?.takeIf { y -> y.isNotBlank() && y != "null" }.orEmpty()
+            val itemUrl = "$base/${if (isTv) "tv" else "movie"}/$id"
+            posterHints[itemUrl] = imageUrl(base, id, it.optString("poster_path"), isTv)
+            titleHints[itemUrl] = if (year.isNotBlank()) "$title ($year)" else title
+            out += MediaEntry(
+                name = if (year.isNotBlank() && !title.contains(year)) "$title ($year)" else title,
+                url = itemUrl,
+                isFolder = true,
+                isVideo = false,
+                isImage = false,
+                sourceOrder = 100_000 - (page - 1) * PAGE_SIZE - i
+            )
+        }
+        val next = if (page < pages && arr.length() > 0) {
+            url.replace(Regex("[?&]page=\\d+"), "").let { c -> c + (if (c.contains("?")) "&" else "?") + "page=${page + 1}" }
+        } else null
+        return out to next
+    }
+
+    fun allPages(categoryUrl: String, maxPages: Int = 6, timeoutMs: Int = 12000): List<MediaEntry> {
+        val out = mutableListOf<MediaEntry>()
+        var url: String? = categoryUrl
+        var n = 0
+        while (url != null && n < maxPages) {
+            val (items, next) = try { list(url, timeoutMs) } catch (_: Exception) { break }
+            out += items
+            url = next
+            n++
+        }
+        return out
+    }
+
+    private fun posterEntry(itemUrl: String, base: String, id: String, isTv: Boolean) = MediaEntry(
+        name = "poster",
+        url = posterHints[itemUrl] ?: imageUrl(base, id, "", isTv),
+        isFolder = false,
+        isVideo = false,
+        isImage = true
+    )
+
+    private fun movie(url: String): List<MediaEntry> {
+        val base = origin(url)
+        val id = Regex("/movie/([^/?#]+)").find(url)?.groupValues?.get(1) ?: throw Exception("Invalid movie link")
+        return listOf(
+            posterEntry(url, base, id, false),
+            MediaEntry(
+                name = titleHints[url] ?: "Movie $id",
+                url = "$base/api/stream/video/stream?type=movies&id=$id",
+                isFolder = false,
+                isVideo = true,
+                isImage = false
+            )
+        )
+    }
+
+    private fun tv(url: String, timeoutMs: Int): List<MediaEntry> {
+        val base = origin(url)
+        val m = Regex("/tv/([^/?#]+)(?:/season/(\\d+))?").find(url) ?: throw Exception("Invalid TV link")
+        val id = m.groupValues[1]
+        val wantSeason = m.groupValues[2].toIntOrNull()
+        val showUrl = "$base/tv/$id"
+        val json = getJson(
+            "$base/api/tv-shows/$id?fields=episodes&episode_fields=${Uri.encode("id,name,season_number,episode_number")}",
+            timeoutMs
+        )
+        val root = (json as? JSONObject)?.let { it.optJSONObject("data") ?: it }
+        val episodes = root?.optJSONArray("episodes") ?: (json as? JSONArray) ?: JSONArray()
+        val bySeason = sortedMapOf<Int, MutableList<JSONObject>>()
+        for (i in 0 until episodes.length()) {
+            val ep = episodes.optJSONObject(i) ?: continue
+            bySeason.getOrPut(ep.optInt("season_number", 1)) { mutableListOf() }.add(ep)
+        }
+        val out = mutableListOf(posterEntry(showUrl, base, id, true))
+        if (wantSeason == null && bySeason.size > 1) {
+            bySeason.forEach { (no, eps) ->
+                out += MediaEntry(
+                    name = "Season $no (${eps.size})",
+                    url = "$showUrl/season/$no",
+                    isFolder = true,
+                    isVideo = false,
+                    isImage = false,
+                    sourceOrder = 1000 - no
+                )
+            }
+            return out
+        }
+        val eps = (if (wantSeason != null) bySeason[wantSeason] else bySeason.values.firstOrNull()).orEmpty()
+            .sortedBy { it.optInt("episode_number", 0) }
+        eps.forEach { ep ->
+            val epId = ep.opt("id")?.toString() ?: return@forEach
+            val s = ep.optInt("season_number", 1)
+            val e = ep.optInt("episode_number", 0)
+            val label = "S${s.toString().padStart(2, '0')}E${e.toString().padStart(2, '0')}" +
+                (ep.optString("name").takeIf { it.isNotBlank() && it != "null" }?.let { " · $it" } ?: "")
+            out += MediaEntry(
+                name = label,
+                url = "$base/api/stream/video/stream?type=tv_shows&id=$epId",
+                isFolder = false,
+                isVideo = true,
+                isImage = false,
+                sourceOrder = e
+            )
+        }
+        return out
+    }
+}
+
+/* ============================================================================
    NATURAL BD — www.naturalbd.com (Next.js) JSON API
    /movies?language=..&genre=..  ->  /api/v1/catalog/browse  ->  /movie/{tmdb} বা /series/{tmdb}
    সিরিজ: /api/catalog/tv/{id} -> /api/catalog/tv/{id}/season/{n}
@@ -1642,6 +1869,7 @@ private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List
     if (CircleNewApi.handles(url)) return withContext(Dispatchers.IO) { CircleNewApi.scan(url, timeoutMs) }
     if (KhulnaplexSite.handles(url)) return withContext(Dispatchers.IO) { KhulnaplexSite.scan(url, timeoutMs) }
     if (NaturalBdApi.handles(url)) return withContext(Dispatchers.IO) { NaturalBdApi.scan(url, timeoutMs) }
+    if (CtgHallApi.handles(url)) return withContext(Dispatchers.IO) { CtgHallApi.scan(url, timeoutMs) }
     if (!url.contains(MULTI_URL_SEPARATOR)) return scanSingleFolder(url, timeoutMs)
     // একাধিক লিংক: সবগুলো একসাথে (parallel) লোড করে merge; একই নামের আইটেম একবারই আসবে
     val parts = url.split(MULTI_URL_SEPARATOR).map { it.trim() }.filter { it.isNotBlank() }
@@ -1732,10 +1960,10 @@ private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L
    RECOMMENDATIONS LOADER (DEEP YEAR / ALPHA / SEASON SUBFOLDER SUPPORT + RETRY)
    ============================================================================ */
 private fun isApiCategory(url: String): Boolean =
-    CircleNewApi.handles(url) || KhulnaplexSite.handles(url) || NaturalBdApi.handles(url)
+    CircleNewApi.handles(url) || KhulnaplexSite.handles(url) || NaturalBdApi.handles(url) || CtgHallApi.handles(url)
 
 private fun apiPosterHint(url: String): String? =
-    NaturalBdApi.posterHint(url) ?: KhulnaplexSite.posterHint(url) ?: CircleNewApi.posterHint(url)
+    NaturalBdApi.posterHint(url) ?: KhulnaplexSite.posterHint(url) ?: CircleNewApi.posterHint(url) ?: CtgHallApi.posterHint(url)
 
 private suspend fun scanCategoryRecommendations(category: Category): List<Recommendation> = withContext(Dispatchers.IO) {
     // API/ওয়েবসাইট সার্ভার: তালিকা থেকেই সরাসরি পোস্টারসহ প্রিভিউ (ভেতরে ঢুকে ভিডিও খোঁজার দরকার নেই)
@@ -1900,6 +2128,14 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
                 if (CircleNewApi.handles(category.url)) {
                     CircleNewApi.search(query, category.url).forEach { entry ->
                         if (found.size < 80 && seen.add(entry.url)) {
+                            found.add(SearchHit(entry.name, entry.url, null, category.name, false))
+                        }
+                    }
+                    return@async
+                }
+                if (CtgHallApi.handles(category.url)) {
+                    CtgHallApi.allPages(category.url).forEach { entry ->
+                        if (found.size < 80 && matchesQuery(entry.name) && seen.add(entry.url)) {
                             found.add(SearchHit(entry.name, entry.url, null, category.name, false))
                         }
                     }
